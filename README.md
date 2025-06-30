@@ -1,4 +1,4 @@
-# vue-codemod
+# vue-codemod-revanced
 
 **Current status: experimental**
 
