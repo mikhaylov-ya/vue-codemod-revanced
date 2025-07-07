@@ -1,8 +1,9 @@
 import { ASTTransformation } from "src/wrapAstTransformation";
-import wrap from '../src/wrapAstTransformation'
-import { transformApollo } from "./modules/transformApollo"
-import { transformWatch } from "./modules/transformWatch"
-import { Property } from "jscodeshift";
+import wrap from '../src/wrapAstTransformation';
+import { transformApollo } from "./modules/transformApollo";
+import { transformWatch } from "./modules/transformWatch";
+import { ensureVueImports } from "./modules/ensureVueImports";
+import { ObjectMethod, ObjectProperty } from "jscodeshift";
 
 const IGNORED_OPTIONS = ['name', 'components'];
 const LIFECYCLE_METHODS = {
@@ -17,68 +18,25 @@ const LIFECYCLE_METHODS = {
 };
 
 export const transformAST: ASTTransformation = (context) => {
-  /** @type {JSCodeShift} */
-  let { j, root, filename } = context
+    /** @type {JSCodeShift} */
+    let { j, root, filename } = context
 
-    let hasInjectImport = false;
     let hasUserInjection = false;
     function replaceThisExpressions(fnAst, ctx) {
-    return fnAst.find(j.MemberExpression, {
-        object: { type: 'ThisExpression' }
-    }).replaceWith((path) => {
-        const prop = path.value.property.name;
-        if (prop === '$user') return j.identifier('user');
-        if (ctx.propNames.includes(prop)) return j.memberExpression(j.identifier('props'), j.identifier(prop));
-        if (ctx.dataNames.includes(prop)) return j.memberExpression(j.identifier(prop), j.identifier('value'));
-        if (ctx.computedNames.includes(prop)) return j.memberExpression(j.identifier(prop), j.identifier('value'));
-
-        return path.node;
-    });
-}
-
-    function ensureUserImports() {
-        // Check if inject is imported from 'vue'
-        const vueImports = root.find(j.ImportDeclaration, {
-            source: { value: "vue" }
+        return fnAst.find(j.MemberExpression, {
+            object: { type: 'ThisExpression' }
+        }).replaceWith((path) => {
+            const prop = path.value.property.name;
+            if (prop === '$user') return j.identifier('user');
+            if (ctx.propNames.includes(prop)) return j.memberExpression(j.identifier('props'), j.identifier(prop));
+            if (ctx.dataNames.includes(prop)) return j.memberExpression(j.identifier(prop), j.identifier('value'));
+            if (ctx.computedNames.includes(prop)) return j.memberExpression(j.identifier(prop), j.identifier('value'));
+            return path.node;
         });
-        let hasInject = false;
-        if (vueImports.length > 0) {
-            vueImports.forEach(path => {
-                const specifiers = path.value.specifiers;
-                hasInject = specifiers.some(spec => spec.type === 'ImportSpecifier' && spec.imported.name === 'inject');
-            });
-        }
-        if (!hasInjectImport && !hasInject) {
-            if (vueImports.length > 0) {
-                // Add inject to existing vue import
-                vueImports.forEach(path => {
-                    const specifiers = path.value.specifiers;
-                    specifiers.push(j.importSpecifier(j.identifier('inject')));
-                });
-            }
-            else {
-                // Create new vue import with inject
-                const injectImport = j.importDeclaration([j.importSpecifier(j.identifier('inject'))], j.literal("vue"));
-                // Add the import
-                const firstImport = root.find(j.ImportDeclaration).at(0);
-                if (firstImport.length > 0) {
-                    firstImport.insertBefore(injectImport);
-                }
-                else {
-                    const program = root.find(j.Program);
-                    if (program.length > 0) {
-                        program.get('body', 0).insertBefore(injectImport);
-                    }
-                }
-            }
-            hasInjectImport = true;
-        }
     }
     function ensureToasterImport() {
         const toasterInjection = 'const toaster = inject<Toaster>("toaster")';
-        const toasterImports = root.find(j.ImportDeclaration, {
-            source: { value: "@/shared/types/toaster" }
-        });
+        const toasterImports = root.find(j.Identifier, { init: "toaster" });
         if (!toasterImports.length) {
             const lastImport = root.find(j.ImportDeclaration).at(-1);
             lastImport.insertAfter(toasterInjection);
@@ -165,15 +123,20 @@ export const transformAST: ASTTransformation = (context) => {
         propNames = property.value.properties.map((property) => property.key.name);
         return `const props = defineProps(${j(property.value).toSource()})`;
     };
-    const transformEmits = (property) => `const emit = defineEmits(${j(property.value).toSource()})`;
+    const transformEmits = (property: ObjectMethod | ObjectProperty) => {
+        const value = property.type === "ObjectMethod"
+            ? property.body.body.find((n) => n.type === "ReturnStatement")!.argument.elements.map((el) => el.value).join(", ")
+            : property.value;
+        return `const emit = defineEmits([${value}])`;
+    };
     const transformSetup = (property) => {
         const returnStatement = j(property)
             .find(j.ReturnStatement)
             .filter((path) => {
-            var _a;
-            return (((_a = path.parentPath.parentPath.parentPath.parentPath.value.key) === null || _a === void 0 ? void 0 : _a.name) ===
-                'setup');
-        });
+                var _a;
+                return (((_a = path.parentPath.parentPath.parentPath.parentPath.value.key) === null || _a === void 0 ? void 0 : _a.name) ===
+                    'setup');
+            });
         const returnObjectExpression = returnStatement.find(j.ObjectExpression);
         // Remove the setup return statement
         returnStatement.remove();
@@ -210,10 +173,8 @@ export const transformAST: ASTTransformation = (context) => {
             const key = nestedProperty.key.name;
             const value = nestedProperty.value;
             if (!value?.params || !value.body) return;
-            // Create a temp AST for the function body
             const fnAst = j(j.arrowFunctionExpression(value.params, value.body));
-            
-            // Replace `this.` references inside computed
+
             replaceThisExpressions(fnAst, {
                 propNames, dataNames, computedNames,
             });
@@ -240,43 +201,8 @@ export const transformAST: ASTTransformation = (context) => {
                 // Create a temporary AST for the method to transform this expressions
                 const methodAST = j(j.functionExpression(null, value.params, value.body, value.generator, value.async));
                 // Find and replace this expressions within this method
-                const thisExpressions = methodAST.find(j.MemberExpression, {
-                    object: {
-                        type: 'ThisExpression',
-                    },
-                    property: {
-                        type: 'Identifier',
-                    },
-                });
-                thisExpressions.replaceWith((path) => {
-                    if (!path.value.property) {
-                        return path.node;
-                    }
-                    const propertyName = path.value.property.name;
-                    // Skip special properties - they're handled globally
-                    if (propertyName.startsWith('$')) {
-                        return path.node; // Keep as-is, will be handled by global transformation
-                    }
-                    if (propNames.includes(propertyName)) {
-                        return j.memberExpression(j.identifier('props'), j.identifier(propertyName));
-                    }
-                    if (computedNames.includes(propertyName)) {
-                        return j.memberExpression(j.identifier(propertyName), j.identifier('value'));
-                    }
-                    if (dataNames.includes(propertyName)) {
-                        return j.memberExpression(j.identifier(propertyName), j.identifier('value'));
-                    }
-                    // Check if this is a method call (this.methodName())
-                    if (path.parent.value.type === 'CallExpression' &&
-                        path.parent.value.callee === path.value) {
-                        // Get method names from the methods object
-                        const methodNames = property.value.properties.map(prop => prop.key.name);
-                        if (methodNames.includes(propertyName)) {
-                            return j.identifier(propertyName);
-                        }
-                    }
-                    printWarning(`Can't replace "this.${propertyName}" expression in method "${key}"`);
-                    return path.node;
+                replaceThisExpressions(methodAST, {
+                    propNames, dataNames, computedNames,
                 });
                 // Get the transformed body - check if function expression exists first
                 const functionExpressions = methodAST.find(j.FunctionExpression);
@@ -317,82 +243,34 @@ export const transformAST: ASTTransformation = (context) => {
     };
     const transformFunctions = {
         props: transformProps,
+        setup: transformSetup,
         data: transformData,
         apollo: transformApollo,
         watch: transformWatch,
         methods: transformMethods,
         computed: transformComputed,
         emits: transformEmits,
-        setup: transformSetup,
     };
-    const transformOutputs = {};
-    defaultObject.properties.forEach((property) => {
-        const key = property.key.name;
-        if (IGNORED_OPTIONS.includes(key))
-            return;
-        if (key in LIFECYCLE_METHODS) {
-            transformOutputs[key] = transformLifeCycleMethods(property);
-            return;
-        }
-        if (key in transformFunctions) {
-            if (key in importEnsureFunctions) importEnsureFunctions[key]();
-            transformOutputs[key] = transformFunctions[key](property, j);
-            return;
-        }
-        printWarning(`ignoring "${key}" option`);
-    });
-    Object.keys(transformOutputs).forEach((key) => {
-        const output = transformOutputs[key];
-        if (!output) return;
-        if (Array.isArray(output)) output.forEach(decl => exportDefaultDeclaration.insertBefore(decl));
-        else exportDefaultDeclaration.insertBefore(output);
-    });
-
-    // Remove the export default declaration
-    root.find(j.ExportDefaultDeclaration).remove();
-
-    // handle this expressions
-    const specialThisExpressions = root.find(j.MemberExpression, {
+    ensureVueImports(j, root);
+    const thisDollarExpressions = root.find(j.Expression, {
         object: {
             type: 'ThisExpression',
         },
+        property: {
+            type: 'Identifier',
+            name: (name) => name.startsWith('$'),
+        }
     });
-    
-    specialThisExpressions.replaceWith((path) => {
+
+    thisDollarExpressions.replaceWith((path) => {
         if (!path.value.property) {
             return path.node;
         }
         const propertyName = path.value.property.name;
-        
-        // Handle regular Vue component properties
-        if (propNames.includes(propertyName)) {
-            return j.memberExpression(j.identifier('props'), j.identifier(propertyName));
-        }
-        if (computedNames.includes(propertyName)) {
-            return j.memberExpression(j.identifier(propertyName), j.identifier('value'));
-        }
-        if (dataNames.includes(propertyName)) {
-            return j.memberExpression(j.identifier(propertyName), j.identifier('value'));
-        }
-        // Check if this is a method call
-        if (path.parent.value.type === 'CallExpression' &&
-            path.parent.value.callee === path.value) {
-            // Get all method names from the original object
-            const allMethodNames = [];
-            if (defaultObject.properties) {
-                const methodsProperty = defaultObject.properties.find(prop => prop.key.name === 'methods');
-                if (methodsProperty && methodsProperty.value.properties) {
-                    allMethodNames.push(...methodsProperty.value.properties.map(prop => prop.key.name));
-                }
-            }
-            if (allMethodNames.includes(propertyName)) {
-                return j.identifier(propertyName);
-            }
-        }
+
         // Handle special Vue instance properties first
         if (propertyName === '$user') {
             // Ensure imports and injection are added
-            ensureUserImports();
             ensureUserInjection();
             // Replace this.$user with user
             return 'user';
@@ -421,8 +299,8 @@ export const transformAST: ASTTransformation = (context) => {
                         j.callExpression(
                             j.memberExpression(j.identifier("toaster"), j.identifier(method)),
                             [messageArg]
-                    )
-                );
+                        )
+                    );
                 }
             }
             ensureToasterImport();
@@ -433,18 +311,86 @@ export const transformAST: ASTTransformation = (context) => {
             return path.node;
         }
         if (propertyName === '$usher') {
-            console.log(`Found this.$usher usage - transformation pending`);
-            return path.node; // Keep as-is for now
+            console.log(`Found this.$usher call is preserved`);
+            return path.node;
         }
-     
+
+        printWarning(`Can't replace "this.${propertyName}" expression`);
+        return path.node;
+    });
+    const transformOutputs = {};
+    defaultObject.properties.forEach((property) => {
+        const key = property.key.name;
+        if (IGNORED_OPTIONS.includes(key))
+            return;
+        if (key in LIFECYCLE_METHODS) {
+            transformOutputs[key] = transformLifeCycleMethods(property);
+            return;
+        }
+        if (key in transformFunctions) {
+            if (key in importEnsureFunctions) importEnsureFunctions[key]();
+            transformOutputs[key] = transformFunctions[key](property, j);
+            return;
+        }
+        printWarning(`ignoring "${key}" option`);
+    });
+    Object.keys(transformOutputs).forEach((key) => {
+        const output = transformOutputs[key];
+        if (!output) return;
+        if (Array.isArray(output)) output.forEach(decl => exportDefaultDeclaration.insertBefore(decl));
+        else exportDefaultDeclaration.insertBefore(output);
+    });
+
+    // Remove the export default declaration
+    root.find(j.ExportDefaultDeclaration).remove();
+
+    // handle this expressions
+    const specialThisExpressions = root.find(j.Expression, {
+        object: {
+            type: 'ThisExpression',
+        },
+    });
+
+    specialThisExpressions.replaceWith((path) => {
+        if (!path.value.property) {
+            return path.node;
+        }
+        const propertyName = path.value.property.name;
+
+        // Handle regular Vue component properties
+        if (propNames.includes(propertyName)) {
+            return j.memberExpression(j.identifier('props'), j.identifier(propertyName));
+        }
+        if (computedNames.includes(propertyName)) {
+            return j.memberExpression(j.identifier(propertyName), j.identifier('value'));
+        }
+        if (dataNames.includes(propertyName)) {
+            return j.memberExpression(j.identifier(propertyName), j.identifier('value'));
+        }
+        // Check if this is a method call
+        if (path.parent.value.type === 'CallExpression' &&
+            path.parent.value.callee === path.value) {
+            // Get all method names from the original object
+            const allMethodNames = [];
+            if (defaultObject.properties) {
+                const methodsProperty = defaultObject.properties.find(prop => prop.key.name === 'methods');
+                if (methodsProperty && methodsProperty.value.properties) {
+                    allMethodNames.push(...methodsProperty.value.properties.map(prop => prop.key.name));
+                }
+            }
+            if (allMethodNames.includes(propertyName)) {
+                return j.identifier(propertyName);
+            }
+        }
+
         printWarning(`Can't replace "this.${propertyName}" expression`);
         return path.node;
     });
     const propsUsages = root
         .find(j.Identifier, { name: 'props' })
         .filter((path) => {
-        return !path.parentPath.value.type.startsWith('VariableDeclarator');
-    });
+            return !path.parentPath.value.type.startsWith('VariableDeclarator');
+        });
     if (!propsUsages.length) {
         root.findVariableDeclarators('props').forEach((path) => {
             const definePropsCall = j.callExpression(j.identifier('defineProps'), [
@@ -455,10 +401,10 @@ export const transformAST: ASTTransformation = (context) => {
         });
     }
     const emitUsages = root
-        .find(j.Identifier, { name: 'emit' })
+        .find(j.Identifier, { name: '$emit' })
         .filter((path) => {
-        return !path.parentPath.value.type.startsWith('VariableDeclarator');
-    });
+            return !path.parentPath.value.type.startsWith('VariableDeclarator');
+        });
     // Remove emit assignment if there is no usage
     if (!emitUsages.length) {
         root.findVariableDeclarators('emit').forEach((path) => {

@@ -1,8 +1,9 @@
-export function transformWatch(watchPropertyNode, j, ) {
+export function transformWatch(watchNode, j) {
+
   const watchCalls = [];
 
   // Process each property in the watch object
-  watchPropertyNode.value.properties.forEach(property => {
+  watchNode.value.properties.forEach((property) => {
     const watchKey = getWatchKey(j, property.key);
     const watchValue = property.value;
 
@@ -49,11 +50,11 @@ function getWatchKey(j, keyNode) {
 function createWatchCallFromObject(j, watchKey, objectValue) {
   let handler = null;
   const options = {};
-  
+
   // Extract handler and options from object properties
   objectValue.properties.forEach(prop => {
     const propName = prop.key.name || prop.key.value;
-    
+
     if (propName === 'handler') {
       handler = prop.value;
     } else if (['deep', 'immediate', 'flush'].includes(propName)) {
@@ -67,17 +68,17 @@ function createWatchCallFromObject(j, watchKey, objectValue) {
 
   // Transform the handler function
   const transformedHandler = transformWatchHandler(j, handler);
-  
+
   // Create the watch expression
   const watchExpression = createWatchExpression(j, watchKey);
-  
+
   // Build the watch call
   const args = [watchExpression, transformedHandler];
-  
+
   // Add options as third argument if any exist
   if (Object.keys(options).length > 0) {
     const optionsObject = j.objectExpression(
-      Object.entries(options).map(([key, value]) => 
+      Object.entries(options).map(([key, value]) =>
         j.objectProperty(j.identifier(key), value)
       )
     );
@@ -95,7 +96,7 @@ function createWatchCallFromObject(j, watchKey, objectValue) {
 function createWatchCallFromFunction(j, watchKey, functionValue) {
   const transformedHandler = transformWatchHandler(j, functionValue);
   const watchExpression = createWatchExpression(j, watchKey);
-  
+
   return j.expressionStatement(
     j.callExpression(j.identifier('watch'), [watchExpression, transformedHandler])
   );
@@ -106,7 +107,7 @@ function createWatchCallFromFunction(j, watchKey, functionValue) {
  */
 function createWatchCallFromMethodName(j, watchKey, methodValue) {
   const watchExpression = createWatchExpression(j, watchKey);
-  
+
   // Convert method name to function call
   let methodCall;
   if (j.Literal.check(methodValue)) {
@@ -114,7 +115,7 @@ function createWatchCallFromMethodName(j, watchKey, methodValue) {
   } else {
     methodCall = methodValue;
   }
-  
+
   return j.expressionStatement(
     j.callExpression(j.identifier('watch'), [watchExpression, methodCall])
   );
@@ -128,11 +129,11 @@ function createWatchExpression(j, watchKey) {
   if (typeof watchKey === 'string' && watchKey.includes('.')) {
     const parts = watchKey.split('.');
     let expression = j.identifier(parts[0]);
-    
+
     for (let i = 1; i < parts.length; i++) {
       expression = j.memberExpression(expression, j.identifier(parts[i]));
     }
-    
+
     // Wrap in arrow function for computed watching
     return j.arrowFunctionExpression([], expression);
   } else {
@@ -153,21 +154,23 @@ function transformWatchHandler(j, handlerNode) {
       handlerNode.body
     );
   } else {
+    const handlerSource = handlerNode.params ? handlerNode : handlerNode.arguments[0];
     // For arrow functions, create a copy
     transformedHandler = j.arrowFunctionExpression(
-      handlerNode.params,
-      handlerNode.body
+      // If watcher callback is wrapped with another func, like lodash.debounce()
+      handlerSource.params,
+      handlerSource.body
     );
   }
-  
+
   // Transform this. accesses within the handler
   j(transformedHandler).find(j.MemberExpression).forEach(path => {
     const node = path.node;
-    
+
     // Check if it's a this. access
     if (j.ThisExpression.check(node.object)) {
       const propertyName = node.property.name || node.property.value;
-      
+
       // Don't transform properties starting with $
       if (typeof propertyName === 'string' && !propertyName.startsWith('$')) {
         // Replace this.property with property.value
@@ -182,6 +185,6 @@ function transformWatchHandler(j, handlerNode) {
       }
     }
   });
-  
+
   return transformedHandler;
 }
