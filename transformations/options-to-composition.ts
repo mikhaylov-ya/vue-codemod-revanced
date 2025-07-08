@@ -192,29 +192,37 @@ export const transformAST: ASTTransformation = (context) => {
     };
 
     const transformMethods = (property) => {
-        const methodDeclarations = property.value.properties.map((nestedProperty) => {
+        return property.value.properties.map((nestedProperty) => {
             // Modify the value of each nested property
             if (!nestedProperty.key) return;
             const key = nestedProperty.key.name || nestedProperty.key.value;
             const value = nestedProperty.value;
+            
             try {
                 // Create a temporary AST for the method to transform this expressions
-                const methodAST = j(j.functionExpression(null, value.params, value.body, value.generator, value.async));
+                const tempFunction = j.functionExpression(null, value.params, value.body, value.generator, value.async);
+                const methodAST = j(tempFunction);
+                
                 // Find and replace this expressions within this method
                 replaceThisExpressions(methodAST, {
                     propNames, dataNames, computedNames,
                 });
-                // Get the transformed body - check if function expression exists first
-                const functionExpressions = methodAST.find(j.FunctionExpression);
-                let transformedBody = value.body;
-                if (functionExpressions.length > 0) {
-                    transformedBody = functionExpressions.get('body').value;
-                }
+                
+                // Get the transformed body directly from the root function we created
+                // Don't search for function expressions as that might find nested ones
+                const transformedBody = methodAST.find(j.Program).get('body', 0, 'expression', 'body').value;
+                
                 const result = j.variableDeclaration('const', [
-                    j.variableDeclarator(j.identifier(key), j.arrowFunctionExpression(value.params, transformedBody, value.async, false // Arrow functions can't be generators
-                    )),
+                    j.variableDeclarator(
+                        j.identifier(key), 
+                        j.arrowFunctionExpression(
+                            value.params, 
+                            transformedBody, 
+                            value.async
+                        )
+                    )
                 ]);
-                console.log(`Successfully transformed method "${key}"`);
+                
                 return result;
             }
             catch (error) {
@@ -223,13 +231,21 @@ export const transformAST: ASTTransformation = (context) => {
                 console.log(j(value).toSource());
                 console.log(`Error: ${error.message}`);
                 console.log(`Stack: ${error.stack}`);
-                // Return a fallback transformation without this replacement
-                return j(j.variableDeclaration('const', [
-                    j.variableDeclarator(j.identifier(key), j.arrowFunctionExpression(value.params, value.body, value.async, false)),
-                ])).toSource();
+                
+                // Return the original method with minimal transformation
+                // Don't try to replace 'this' expressions if it's failing
+                return j.variableDeclaration('const', [
+                    j.variableDeclarator(
+                        j.identifier(key), 
+                        j.arrowFunctionExpression(
+                            value.params, 
+                            value.body, 
+                            value.async
+                        )
+                    )
+                ]);
             }
-        });
-        return methodDeclarations;
+        }).filter(Boolean);
     };
     const transformLifeCycleMethods = (property) => {
         const methodBodyString = j(property.value).toSource();
@@ -314,6 +330,7 @@ export const transformAST: ASTTransformation = (context) => {
             console.log(`Found this.$usher call is preserved`);
             return path.node;
         }
+        if (propertyName === '$emit') return 'emit';
 
         printWarning(`Can't replace "this.${propertyName}" expression`);
         return path.node;
