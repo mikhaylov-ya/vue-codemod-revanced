@@ -22,6 +22,8 @@ export const transformAST: ASTTransformation = (context) => {
     let { j, root, filename } = context
 
     let hasUserInjection = false;
+    let hasRouteInjection = false;
+    let hasRouterInjection = false;
     function replaceThisExpressions(fnAst: any, ctx: any) {
         return fnAst.find(j.MemberExpression, {
             object: { type: 'ThisExpression' }
@@ -48,6 +50,52 @@ export const transformAST: ASTTransformation = (context) => {
             const lastImport = root.find(j.ImportDeclaration).at(-1);
             lastImport.insertAfter(userInjection);
             hasUserInjection = true;
+        }
+    }
+    function ensureRouteInjection() {
+        if (!hasRouteInjection) {
+            // Add useRoute import if not already present
+            const useRouteImports = root.find(j.ImportDeclaration, {
+                source: { value: 'vue-router' }
+            }).find(j.ImportSpecifier, {
+                imported: { name: 'useRoute' }
+            });
+
+            if (!useRouteImports.length) {
+                const lastImport = root.find(j.ImportDeclaration).at(-1);
+                lastImport.insertBefore('import { useRoute } from "vue-router";');
+            }
+
+            const routeInjection = "const route = useRoute();";
+            const routeImports = root.find(j.Identifier, { name: "route" });
+            if (!routeImports.length) {
+                const lastImport = root.find(j.ImportDeclaration).at(-1);
+                lastImport.insertBefore(routeInjection);
+            }
+            hasRouteInjection = true;
+        }
+    }
+    function ensureRouterInjection() {
+        if (!hasRouterInjection) {
+            // Add useRouter import if not already present
+            const useRouterImports = root.find(j.ImportDeclaration, {
+                source: { value: 'vue-router' }
+            }).find(j.ImportSpecifier, {
+                imported: { name: 'useRouter' }
+            });
+
+            if (!useRouterImports.length) {
+                const lastImport = root.find(j.ImportDeclaration).at(-1);
+                lastImport.insertBefore('import { useRouter } from "vue-router";');
+            }
+
+            const routerInjection = "const router = useRouter();";
+            const routerImports = root.find(j.Identifier, { name: "router" });
+            if (!routerImports.length) {
+                const lastImport = root.find(j.ImportDeclaration).at(-1);
+                lastImport.insertBefore(routerInjection);
+            }
+            hasRouterInjection = true;
         }
     }
 
@@ -253,11 +301,6 @@ export const transformAST: ASTTransformation = (context) => {
         return `${LIFECYCLE_METHODS[property.key.name as keyof typeof LIFECYCLE_METHODS]}(${methodBodyString})`;
     };
 
-    const importEnsureFunctions = {
-        // data:
-        // computed:
-        // watch:
-    };
     const transformFunctions = {
         props: transformProps,
         setup: transformSetup,
@@ -331,6 +374,18 @@ export const transformAST: ASTTransformation = (context) => {
             console.log(`Found this.$usher call is preserved`);
             return path.node;
         }
+        if (propertyName === '$route') {
+            // Ensure imports and injection are added
+            ensureRouteInjection();
+            // Replace this.$route with route
+            return 'route';
+        }
+        if (propertyName === '$router') {
+            // Ensure imports and injection are added
+            ensureRouterInjection();
+            // Replace this.$router with router
+            return 'router';
+        }
         if (propertyName === '$emit') return 'emit';
 
         printWarning(`Can't replace "this.${propertyName}" expression`);
@@ -346,7 +401,6 @@ export const transformAST: ASTTransformation = (context) => {
             return;
         }
         if (key in transformFunctions) {
-            if (key in importEnsureFunctions) importEnsureFunctions[key]();
             transformOutputs[key] = transformFunctions[key](property, j);
             return;
         }
