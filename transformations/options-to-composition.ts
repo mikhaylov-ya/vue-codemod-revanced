@@ -3,7 +3,7 @@ import wrap from '../src/wrapAstTransformation';
 import { transformApollo } from "./modules/transformApollo";
 import { transformWatch } from "./modules/transformWatch";
 import { ensureVueImports } from "./modules/ensureVueImports";
-import { ObjectMethod, ObjectProperty } from "jscodeshift";
+import { FunctionExpression, ObjectMethod, ObjectProperty } from "jscodeshift";
 
 const IGNORED_OPTIONS = ['name', 'components'];
 const LIFECYCLE_METHODS = {
@@ -22,10 +22,10 @@ export const transformAST: ASTTransformation = (context) => {
     let { j, root, filename } = context
 
     let hasUserInjection = false;
-    function replaceThisExpressions(fnAst, ctx) {
+    function replaceThisExpressions(fnAst: any, ctx: any) {
         return fnAst.find(j.MemberExpression, {
             object: { type: 'ThisExpression' }
-        }).replaceWith((path) => {
+        }).replaceWith((path: any) => {
             const prop = path.value.property.name;
             if (prop === '$user') return j.identifier('user');
             if (ctx.propNames.includes(prop)) return j.memberExpression(j.identifier('props'), j.identifier(prop));
@@ -71,11 +71,11 @@ export const transformAST: ASTTransformation = (context) => {
     let dataNames: string[] = [];
     let computedNames: string[] = [];
 
-    const transformData = (property) => {
+    const transformData = (property: any) => {
         if (property.value.type === 'ObjectExpression') {
             // Handle data as object literal: data: { count: 0, name: 'test' }
-            dataNames = property.value.properties.map((prop) => prop.key.name);
-            const dataDeclarations = property.value.properties.map((dataProperty) => {
+            dataNames = property.value.properties.map((prop: any) => prop.key.name);
+            const dataDeclarations = property.value.properties.map((dataProperty: any) => {
                 if (!dataProperty.key)
                     return;
                 const key = dataProperty.key.name || dataProperty.key.value;
@@ -94,8 +94,8 @@ export const transformAST: ASTTransformation = (context) => {
                 .at(0); // Get the first return statement in the data function
             if (returnStatement.length && returnStatement.get().value.argument.type === 'ObjectExpression') {
                 const returnObject = returnStatement.get().value.argument;
-                dataNames = returnObject.properties.map((prop) => prop.key.name);
-                const dataDeclarations = returnObject.properties.map((dataProperty) => {
+                dataNames = returnObject.properties.map((prop: any) => prop.key.name);
+                const dataDeclarations = returnObject.properties.map((dataProperty: any) => {
                     if (!dataProperty.key) {
                         return;
                     }
@@ -118,9 +118,9 @@ export const transformAST: ASTTransformation = (context) => {
             return '';
         }
     };
-    const transformProps = (property) => {
+    const transformProps = (property: any) => {
         // Remember the prop names
-        propNames = property.value.properties.map((property) => property.key.name);
+        propNames = property.value.properties.map((property: any) => property.key.name);
         return `const props = defineProps(${j(property.value).toSource()})`;
     };
     const transformEmits = (property: ObjectMethod | ObjectProperty) => {
@@ -129,10 +129,10 @@ export const transformAST: ASTTransformation = (context) => {
             : property.value;
         return `const emit = defineEmits([${value}])`;
     };
-    const transformSetup = (property) => {
+    const transformSetup = (property: any) => {
         const returnStatement = j(property)
             .find(j.ReturnStatement)
-            .filter((path) => {
+            .filter((path: any) => {
                 var _a;
                 return (((_a = path.parentPath.parentPath.parentPath.parentPath.value.key) === null || _a === void 0 ? void 0 : _a.name) ===
                     'setup');
@@ -144,7 +144,7 @@ export const transformAST: ASTTransformation = (context) => {
         if (returnObjectExpression.length) {
             const objectNode = returnObjectExpression.get().node;
             // Iterate over the properties of the object
-            const returnVariableDeclarations = objectNode.properties.map((property) => {
+            const returnVariableDeclarations = objectNode.properties.map((property: any) => {
                 if (property.type === 'Property') {
                     const key = property.key.name;
                     if (property.value.type === 'Identifier' &&
@@ -167,9 +167,9 @@ export const transformAST: ASTTransformation = (context) => {
         }
         return setupBodySource;
     };
-    const transformComputed = (property) => {
-        computedNames = property.value.properties.map(p => p.key.name);
-        return property.value.properties.map((nestedProperty) => {
+    const transformComputed = (property: any) => {
+        computedNames = property.value.properties.map((p: any) => p.key.name);
+        return property.value.properties.map((nestedProperty: any) => {
             const key = nestedProperty.key.name;
             const value = nestedProperty.value;
             if (!value?.params || !value.body) return;
@@ -191,38 +191,39 @@ export const transformAST: ASTTransformation = (context) => {
         }).filter(Boolean);
     };
 
-    const transformMethods = (property) => {
-        return property.value.properties.map((nestedProperty) => {
+    const transformMethods = (property: any) => {
+        return property.value.properties.map((nestedProperty: any) => {
             // Modify the value of each nested property
             if (!nestedProperty.key) return;
             const key = nestedProperty.key.name || nestedProperty.key.value;
             const value = nestedProperty.value;
-            
+
             try {
                 // Create a temporary AST for the method to transform this expressions
                 const tempFunction = j.functionExpression(null, value.params, value.body, value.generator, value.async);
                 const methodAST = j(tempFunction);
-                
+
                 // Find and replace this expressions within this method
                 replaceThisExpressions(methodAST, {
                     propNames, dataNames, computedNames,
                 });
-                
+
                 // Get the transformed body directly from the root function we created
                 // Don't search for function expressions as that might find nested ones
-                const transformedBody = methodAST.find(j.Program).get('body', 0, 'expression', 'body').value;
-                
+                const funcNode = methodAST.get().node as FunctionExpression;
+                const transformedBody = funcNode.body;
+
                 const result = j.variableDeclaration('const', [
                     j.variableDeclarator(
-                        j.identifier(key), 
+                        j.identifier(key),
                         j.arrowFunctionExpression(
-                            value.params, 
-                            transformedBody, 
+                            value.params,
+                            transformedBody,
                             value.async
                         )
                     )
                 ]);
-                
+
                 return result;
             }
             catch (error) {
@@ -231,15 +232,15 @@ export const transformAST: ASTTransformation = (context) => {
                 console.log(j(value).toSource());
                 console.log(`Error: ${error.message}`);
                 console.log(`Stack: ${error.stack}`);
-                
+
                 // Return the original method with minimal transformation
                 // Don't try to replace 'this' expressions if it's failing
                 return j.variableDeclaration('const', [
                     j.variableDeclarator(
-                        j.identifier(key), 
+                        j.identifier(key),
                         j.arrowFunctionExpression(
-                            value.params, 
-                            value.body, 
+                            value.params,
+                            value.body,
                             value.async
                         )
                     )
@@ -247,14 +248,14 @@ export const transformAST: ASTTransformation = (context) => {
             }
         }).filter(Boolean);
     };
-    const transformLifeCycleMethods = (property) => {
+    const transformLifeCycleMethods = (property: any) => {
         const methodBodyString = j(property.value).toSource();
-        return `${LIFECYCLE_METHODS[property.key.name]}(${methodBodyString})`;
+        return `${LIFECYCLE_METHODS[property.key.name as keyof typeof LIFECYCLE_METHODS]}(${methodBodyString})`;
     };
 
     const importEnsureFunctions = {
-        // data: 
-        // computed: 
+        // data:
+        // computed:
         // watch:
     };
     const transformFunctions = {
@@ -274,12 +275,12 @@ export const transformAST: ASTTransformation = (context) => {
         },
         property: {
             type: 'Identifier',
-            name: (name) => name.startsWith('$'),
+            name: (name: string) => name.startsWith('$'),
         }
     });
 
-    thisDollarExpressions.replaceWith((path) => {
-        if (!path.value.property) {
+    thisDollarExpressions.replaceWith((path: any) => {
+        if (!('property' in path.value) || !path.value.property) {
             return path.node;
         }
         const propertyName = path.value.property.name;
@@ -336,7 +337,7 @@ export const transformAST: ASTTransformation = (context) => {
         return path.node;
     });
     const transformOutputs = {};
-    defaultObject.properties.forEach((property) => {
+    defaultObject.properties.forEach((property: any) => {
         const key = property.key.name;
         if (IGNORED_OPTIONS.includes(key))
             return;
@@ -368,8 +369,8 @@ export const transformAST: ASTTransformation = (context) => {
         },
     });
 
-    specialThisExpressions.replaceWith((path) => {
-        if (!path.value.property) {
+    specialThisExpressions.replaceWith((path: any) => {
+        if (!('property' in path.value) || !path.value.property) {
             return path.node;
         }
         const propertyName = path.value.property.name;

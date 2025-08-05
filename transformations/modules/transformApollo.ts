@@ -1,22 +1,25 @@
-import { ASTNode } from "jscodeshift";
+import { ASTNode, ObjectExpression, Property as PropertyType } from "jscodeshift";
 
-export function transformApollo(property, j) {
+export function transformApollo(property: PropertyType, j: any) {
     const toReturn: ASTNode[] = [];
+    if (!("properties" in property.value)) {
+        console.warn("property is not an object", property)
+        return;
+    }
     const apolloFields = property.value.properties;
-    apolloFields.forEach((field) => {
-        const queryKey = field.key.name || field.key.value;
-        const config = field.value;
+    apolloFields.forEach((field: any) => {
+        const queryKey = (field.key.name || field.key.value) as string;
+        const config = field.value as ObjectExpression;
         if (config.type !== 'ObjectExpression') {
             console.warn("config is not an object", config)
             return;
         }
 
         // Extract relevant sub-properties
-        const queryConfig = {};
-        config.properties.forEach((prop) => {            
-            const key = prop.key.name || prop.key.value;            
-            queryConfig[key] = prop.value;
-        });
+        const queryConfig = config.properties.reduce((acc: any, prop: any) => {
+            const key = prop.key.name || prop.key.value;
+            return { ...acc, [key]: prop.value }
+        }, {});
 
         if (!queryConfig.query || queryConfig.query.callee?.name !== 'require') {
             console.warn("Query not found:", queryConfig)
@@ -25,7 +28,7 @@ export function transformApollo(property, j) {
 
         // Step 1: Extract .gql path and build gql tag
         const gqlId = j.identifier(`${queryKey}_gql`);
-        
+
         const gqlPath = queryConfig.query.source?.value ?? queryConfig.query.arguments[0].value;
         const gqlConst = j.variableDeclaration('const', [
             j.variableDeclarator(
@@ -38,15 +41,81 @@ export function transformApollo(property, j) {
         ]);
         toReturn.unshift(j(gqlConst).toSource());
 
-        // Step 2: Extract variable names from variables() { return { ... } }
-        const variablesFn = queryConfig.variables;
-        const varProps = variablesFn?.body?.body?.[0]?.argument?.properties || [];
-        const variablesObjectProps = varProps.map(p =>
-            j.property('init', p.key, p.value)
-        );
+        // Step 2: Extract variable names from variables() { return { ... } } or variables: { ... }
+        const queryVariables = queryConfig.variables;
+        let variablesObjectProps = [];
 
-        // Step 3: transfer options!
-        // 3.1 Derive `enabled` from `skip()`
+        if (queryVariables?.type === 'FunctionExpression') {
+            // Handle function-type variables: variables() { return { ... } }
+            const returnStatement = queryVariables?.body?.body?.[0];
+            if (returnStatement?.type === 'ReturnStatement') {
+                if (returnStatement.argument?.type === 'ObjectExpression') {
+                    // Return statement returns an object: return { ... }
+                    const varProps = returnStatement.argument.properties || [];
+                    variablesObjectProps = varProps.map((p: any) => {
+                        if (p.type === 'SpreadElement') {
+                            return j.spreadElement(p.argument);
+                        }
+                        return j.property('init', p.key, p.value)
+                    });
+                } else {
+                    // Return statement returns a function call or expression: return this.method()
+                    // We'll wrap it in a computed function that calls the original function
+                    variablesObjectProps = [];
+                    const originalFunction = j.arrowFunctionExpression(
+                        queryVariables.params,
+                        queryVariables.body,
+                        false
+                    );
+                    const variablesComputedId = j.identifier(`${queryKey}_variables`);
+                    const variablesComputedDecl = j.variableDeclaration('const', [
+                        j.variableDeclarator(
+                            variablesComputedId,
+                            j.callExpression(j.identifier('computed'), [originalFunction])
+                        )
+                    ]);
+                    toReturn.push(j(variablesComputedDecl).toSource());
+
+                    // Skip the rest of the processing since we've already created the computed
+                    const queryVarId = j.identifier(`${queryKey}_query`);
+                    const useQueryDecl = j.variableDeclaration('const', [
+                        j.variableDeclarator(
+                            queryVarId,
+                            j.callExpression(j.identifier('useQuery'), [
+                                gqlId,
+                                variablesComputedId,
+                                j.objectExpression([])
+                            ])
+                        )
+                    ]);
+                    toReturn.push(j(useQueryDecl).toSource());
+                    return;
+                }
+            }
+        } else if (queryVariables?.type === 'ObjectExpression') {
+            // Handle object-type variables: variables: { ... }
+            variablesObjectProps = queryVariables.properties.map((p: any) => {
+                if (p.type === 'SpreadElement') {
+                    return j.spreadElement(p.argument);
+                }
+                return j.property('init', p.key, p.value)
+            });
+        }
+
+        // Step 3: Create computed variables object
+        const variablesComputedId = j.identifier(`${queryKey}_variables`);
+        const variablesComputedDecl = j.variableDeclaration('const', [
+            j.variableDeclarator(
+                variablesComputedId,
+                j.callExpression(j.identifier('computed'), [
+                    j.arrowFunctionExpression([], j.objectExpression(variablesObjectProps))
+                ])
+            )
+        ]);
+        toReturn.push(j(variablesComputedDecl).toSource());
+
+        // Step 4: transfer options!
+        // 4.1 Derive `enabled` from `skip()`
         const optionsProps = [];
         const skipFn = queryConfig.skip;
         if (skipFn?.type === 'FunctionExpression') {
@@ -64,30 +133,29 @@ export function transformApollo(property, j) {
                 j.property('init', j.identifier('enabled'), j.literal(true))
             );
         }
-        // 3.2 add fetchPolicy
+        // 4.2 add fetchPolicy
         if (queryConfig.fetchPolicy) {
             optionsProps.push(
                 j.property('init', j.identifier('fetchPolicy'), queryConfig.fetchPolicy)
             );
         }
 
-        // Step 4: useQuery declaration
-        // 4.1: transforming update() handler
+        // Step 5: useQuery declaration
+        // 5.1: transforming update() handler
         const updateFn = queryConfig.update;
         if (updateFn?.type === 'FunctionExpression') {
             const arrowUpdateFn = j.arrowFunctionExpression(updateFn.params, updateFn.body, false);
-            optionsProps.push(j.property('init', j.identifier('transformResult'), arrowUpdateFn));
+            optionsProps.push(j.property('init', j.identifier('update'), arrowUpdateFn));
         }
 
+        const queryVarId = j.identifier(`${queryKey}_query`);
 
-
-        const queryVarId = j.identifier(`q_${queryKey}`);
         const useQueryDecl = j.variableDeclaration('const', [
             j.variableDeclarator(
                 queryVarId,
                 j.callExpression(j.identifier('useQuery'), [
                     gqlId,
-                    j.objectExpression(variablesObjectProps),
+                    variablesComputedId,
                     j.objectExpression(optionsProps)
                 ])
             )
