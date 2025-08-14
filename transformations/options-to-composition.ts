@@ -22,6 +22,7 @@ export const transformAST: ASTTransformation = (context) => {
     let { j, root, filename } = context
 
     let hasUserInjection = false;
+    let hasToasterInjection = false;
     let hasRouteInjection = false;
     let hasRouterInjection = false;
     function replaceThisExpressions(fnAst: any, ctx: any) {
@@ -36,21 +37,17 @@ export const transformAST: ASTTransformation = (context) => {
             return path.node;
         });
     }
-    function ensureToasterImport() {
-        const toasterInjection = 'const toaster = inject<Toaster>("toaster")';
-        const toasterImports = root.find(j.Identifier, { init: "toaster" });
-        if (!toasterImports.length) {
-            const lastImport = root.find(j.ImportDeclaration).at(-1);
-            lastImport.insertAfter(toasterInjection);
-        }
+    function ensureToasterInjection() {
+        const toasterInjection = 'const toaster = inject<Toaster>("toaster");';
+        const lastImport = root.find(j.ImportDeclaration).at(-1);
+        lastImport.insertAfter(toasterInjection);
+        hasToasterInjection = true;
     }
     function ensureUserInjection() {
-        if (!hasUserInjection) {
-            const userInjection = "const user = inject<GQLUserPlugin>(\"$user\");";
-            const lastImport = root.find(j.ImportDeclaration).at(-1);
-            lastImport.insertAfter(userInjection);
-            hasUserInjection = true;
-        }
+        const userInjection = "const user = inject<GQLUserPlugin>(\"$user\");";
+        const lastImport = root.find(j.ImportDeclaration).at(-1);
+        lastImport.insertAfter(userInjection);
+        hasUserInjection = true;
     }
     function ensureRouteInjection() {
         if (!hasRouteInjection) {
@@ -375,7 +372,7 @@ export const transformAST: ASTTransformation = (context) => {
         // Handle special Vue instance properties first
         if (propertyName === '$user') {
             // Ensure imports and injection are added
-            ensureUserInjection();
+            if (!hasUserInjection) ensureUserInjection();
             // Replace this.$user with user
             return 'user';
         }
@@ -407,7 +404,7 @@ export const transformAST: ASTTransformation = (context) => {
                     );
                 }
             }
-            ensureToasterImport();
+            if (!hasToasterInjection) ensureToasterInjection();
             return;
         }
         if (propertyName === '$apollo') {
