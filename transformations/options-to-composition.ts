@@ -220,6 +220,50 @@ export const transformAST: ASTTransformation = (context) => {
         return property.value.properties.map((nestedProperty: any) => {
             const key = nestedProperty.key.name;
             const value = nestedProperty.value;
+
+            // Handle get/set computed properties
+            if (value.type === 'ObjectExpression') {
+                const getProperty = value.properties.find((prop: any) => prop.key.name === 'get');
+                const setProperty = value.properties.find((prop: any) => prop.key.name === 'set');
+
+                if (getProperty || setProperty) {
+                    const computedObject = j.objectExpression([]);
+
+                                        if (getProperty) {
+                        const getValue = getProperty.value;
+                        const getFnAst = j(j.arrowFunctionExpression(getValue.params, getValue.body));
+
+                        replaceThisExpressions(getFnAst, {
+                            propNames, dataNames, computedNames,
+                        });
+
+                        const newGetBody = getFnAst.get().value.body;
+                        const getMethod = j.objectMethod('method', j.identifier('get'), getValue.params, newGetBody);
+                        computedObject.properties.push(getMethod);
+                    }
+
+                    if (setProperty) {
+                        const setValue = setProperty.value;
+                        const setFnAst = j(j.arrowFunctionExpression(setValue.params, setValue.body));
+
+                        replaceThisExpressions(setFnAst, {
+                            propNames, dataNames, computedNames,
+                        });
+
+                        const newSetBody = setFnAst.get().value.body;
+                        const setMethod = j.objectMethod('method', j.identifier('set'), setValue.params, newSetBody);
+                        computedObject.properties.push(setMethod);
+                    }
+
+                    const computedCall = j.callExpression(j.identifier('computed'), [computedObject]);
+
+                    return j.variableDeclaration('const', [
+                        j.variableDeclarator(j.identifier(key), computedCall),
+                    ]);
+                }
+            }
+
+            // Handle simple function computed properties (existing logic)
             if (!value?.params || !value.body) return;
             const fnAst = j(j.arrowFunctionExpression(value.params, value.body));
 
